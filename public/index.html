@@ -43,7 +43,18 @@
     border-bottom:1px solid var(--line);
     padding-bottom:20px;
   }
-  .brand{display:flex; align-items:baseline; gap:10px;}
+  .brand{display:flex; align-items:center; gap:10px;}
+  .health-dot{
+    width:8px; height:8px; border-radius:50%;
+    background:#5b6469;
+    display:inline-block;
+    transition:background .2s ease;
+  }
+  .health-dot.awake{ background:var(--ok); box-shadow:0 0 6px var(--ok); }
+  .health-dot.waking{ background:var(--warn); animation:pulse 1.2s infinite ease-in-out; }
+  .health-dot.offline{ background:var(--err); }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  .health-label{ font-size:11.5px; color:var(--text-dim); font-family:var(--mono); }
   .brand .mark{
     font-family:var(--mono);
     color:var(--accent);
@@ -304,6 +315,8 @@
       <div>
         <h1>Reel Reader</h1>
       </div>
+      <span class="health-dot" id="healthDot" title="Backend status"></span>
+      <span class="health-label" id="healthLabel">checking backend…</span>
     </div>
     <div class="sub">Import a logged-in session, list target profiles, and pull every Reels URL from each — driven by Playwright on your own machine.</div>
   </header>
@@ -401,6 +414,63 @@
   let cookiesData = null;
   let currentJobId = null;
   let pollTimer = null;
+  let backendAwake = false;
+
+  // --- Backend wake/health indicator (same pattern used in the Vercel integration) ---
+  const healthDot = document.getElementById('healthDot');
+  const healthLabel = document.getElementById('healthLabel');
+
+  function setHealthUI(phase, elapsedMs) {
+    healthDot.className = 'health-dot ' + (phase === 'awake' ? 'awake' : phase === 'waking' ? 'waking' : phase === 'timeout' ? 'offline' : '');
+    const labels = {
+      checking: 'checking backend…',
+      waking: 'backend is waking up (cold start)…',
+      awake: elapsedMs ? `backend awake (${Math.round(elapsedMs / 1000)}s)` : 'backend awake',
+      timeout: 'backend unreachable',
+    };
+    healthLabel.textContent = labels[phase] || phase;
+  }
+
+  async function pingHealth(timeoutMs = 5000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch('/healthz', { signal: controller.signal, cache: 'no-store' });
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function ensureBackendAwake({ maxWaitMs = 90000, pollIntervalMs = 3000 } = {}) {
+    const start = Date.now();
+    setHealthUI('checking');
+
+    if (await pingHealth()) {
+      backendAwake = true;
+      setHealthUI('awake', Date.now() - start);
+      return true;
+    }
+
+    setHealthUI('waking');
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+      if (await pingHealth()) {
+        backendAwake = true;
+        setHealthUI('awake', Date.now() - start);
+        return true;
+      }
+    }
+
+    backendAwake = false;
+    setHealthUI('timeout');
+    return false;
+  }
+
+  // Check on load so the dot reflects reality before you even touch the form.
+  ensureBackendAwake({ maxWaitMs: 20000 }); // short budget on load — full wait happens on Start if needed
 
   // --- Cookie import ---
   ['dragover', 'dragenter'].forEach(evt =>
@@ -513,10 +583,22 @@
     const headless = document.getElementById('headless').checked;
 
     startBtn.disabled = true;
-    startBtn.textContent = 'Scraping…';
     downloadActions.style.display = 'none';
     resultsArea.innerHTML = '<div class="empty-state">Reel URLs will appear here as each profile is scraped.</div>';
     resultCount.textContent = '0 profiles';
+
+    if (!backendAwake) {
+      startBtn.textContent = 'Waking backend…';
+      const awake = await ensureBackendAwake({ maxWaitMs: 90000 });
+      if (!awake) {
+        alert("Backend didn't wake up in time. Check your Render service and try again.");
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start scraping';
+        return;
+      }
+    }
+
+    startBtn.textContent = 'Scraping…';
 
     try {
       const res = await fetch('/api/scrape/start', {
