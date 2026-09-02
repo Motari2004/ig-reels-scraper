@@ -11,7 +11,8 @@
   "dependencies": {
     "express": "^4.19.2",
     "playwright": "^1.47.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "axios": "^1.7.2"
   },
   "engines": {
     "node": ">=18"
