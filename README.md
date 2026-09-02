@@ -103,30 +103,6 @@ residential one — Instagram is more likely to rate-limit or challenge sessions
 from it than from your home connection. If you start seeing `login_wall` results
 that a fresh cookie export doesn't fix, that's usually why.
 
-## Handling Render's free-tier sleep
-
-Free-tier Render instances spin down after inactivity, so the first request
-after idle time can take 30-60s (cold start). Rather than let a request just
-hang, the app exposes a public, unauthenticated **`GET /healthz`** endpoint
-that returns instantly once the process is up — you poll that first, show a
-"waking up" state, and only fire the real request once it responds.
-
-- **Built into this UI already**: `public/index.html` shows a live status dot
-  (checking → waking → awake) and gates the "Start scraping" button behind
-  the same check, so cold starts show clear progress instead of a stuck
-  button.
-- **For the separate Vercel frontend**: `vercel-integration/wakeBackend.js`
-  is a drop-in copy of the same logic (ping → backoff-poll → resolve true/false),
-  meant to be called from a Vercel API route before you proxy the real request
-  through to Render. `vercel-integration/api-route-example.js` shows the full
-  pattern: browser → Vercel API route → `wakeBackend()` → proxied call to
-  Render with the API key attached server-side.
-
-`/healthz` is intentionally placed before auth in `server.js` and has CORS
-wide open — it returns nothing sensitive (just an uptime counter), so it's
-safe to poll directly from a browser on another domain if you'd rather skip
-the proxy hop for this one check.
-
 ## Notes and limits
 
 - **Terms of Service**: automated scraping conflicts with Instagram's ToS. This is

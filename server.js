@@ -3,26 +3,11 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
-const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const { scrapeProfiles } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BOOT_TIME = Date.now();
-
-/**
- * Public health check — deliberately placed before auth so the frontend can poll
- * it to detect "asleep vs awake" without needing credentials. Keep this endpoint
- * cheap: no job lookups, no cookie handling, just "is the process up".
- * CORS is wide open here specifically because it carries no sensitive data.
- */
-app.get('/healthz', cors(), (req, res) => {
-  res.json({
-    status: 'awake',
-    uptimeSeconds: Math.round((Date.now() - BOOT_TIME) / 1000),
-  });
-});
 
 /**
  * Optional HTTP Basic Auth. Disabled (no-op) unless both AUTH_USER and AUTH_PASS
