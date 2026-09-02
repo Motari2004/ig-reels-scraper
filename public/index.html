@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reel Reader — Instagram Reels URL Scraper</title>
+<style>
+  :root{
+    --bg: #0d1012;
+    --panel: #14181b;
+    --panel-2: #191e22;
+    --line: #262c30;
+    --text: #e7ebed;
+    --text-dim: #8b969c;
+    --accent: #ffb648;
+    --accent-dim: #7a5a26;
+    --ok: #5fd88a;
+    --warn: #f2c14e;
+    --err: #ff6b6b;
+    --mono: "SF Mono", "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    min-height:100vh;
+  }
+  .wrap{
+    max-width:1180px;
+    margin:0 auto;
+    padding:36px 24px 80px;
+  }
+  header{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    gap:16px;
+    margin-bottom:28px;
+    flex-wrap:wrap;
+    border-bottom:1px solid var(--line);
+    padding-bottom:20px;
+  }
+  .brand{display:flex; align-items:baseline; gap:10px;}
+  .brand .mark{
+    font-family:var(--mono);
+    color:var(--accent);
+    font-size:13px;
+    letter-spacing:0.02em;
+  }
+  h1{
+    font-size:22px;
+    font-weight:600;
+    margin:0;
+    letter-spacing:-0.01em;
+  }
+  .sub{
+    color:var(--text-dim);
+    font-size:13.5px;
+    max-width:420px;
+    line-height:1.5;
+  }
+
+  .grid{
+    display:grid;
+    grid-template-columns:380px 1fr;
+    gap:20px;
+  }
+  @media (max-width: 880px){
+    .grid{ grid-template-columns: 1fr; }
+  }
+
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:20px;
+  }
+  .panel + .panel{ margin-top:20px; }
+
+  .field-label{
+    font-size:12.5px;
+    color:var(--text-dim);
+    margin-bottom:8px;
+    display:block;
+  }
+
+  .drop{
+    border:1px dashed var(--line);
+    border-radius:8px;
+    padding:18px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s ease, background .15s ease;
+    background:var(--panel-2);
+  }
+  .drop:hover, .drop.drag{
+    border-color:var(--accent-dim);
+    background:#1b1712;
+  }
+  .drop input{ display:none; }
+  .drop .hint{ font-size:12.5px; color:var(--text-dim); margin-top:4px; }
+  .drop .status{
+    font-family:var(--mono);
+    font-size:12.5px;
+    margin-top:8px;
+  }
+  .drop .status.good{ color:var(--ok); }
+  .drop .status.bad{ color:var(--err); }
+
+  textarea{
+    width:100%;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:8px;
+    color:var(--text);
+    font-family:var(--mono);
+    font-size:13px;
+    padding:12px;
+    resize:vertical;
+    min-height:110px;
+    line-height:1.6;
+  }
+  textarea::placeholder{ color:#5b6469; }
+  textarea:focus, input:focus{
+    outline:none;
+    border-color:var(--accent-dim);
+  }
+
+  .row{
+    display:flex;
+    gap:12px;
+    margin-top:14px;
+  }
+  .row .col{ flex:1; }
+  input[type="number"]{
+    width:100%;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:8px;
+    color:var(--text);
+    font-family:var(--mono);
+    font-size:13px;
+    padding:9px 10px;
+  }
+
+  .toggle{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-top:14px;
+    font-size:13px;
+    color:var(--text-dim);
+  }
+  .toggle input{ accent-color:var(--accent); }
+
+  button.primary{
+    width:100%;
+    margin-top:18px;
+    background:var(--accent);
+    color:#1a1305;
+    border:none;
+    border-radius:8px;
+    padding:12px 16px;
+    font-weight:600;
+    font-size:14px;
+    cursor:pointer;
+    transition:filter .15s ease, transform .05s ease;
+  }
+  button.primary:hover{ filter:brightness(1.08); }
+  button.primary:active{ transform:scale(0.99); }
+  button.primary:disabled{
+    background:#3a3a3a;
+    color:#8a8a8a;
+    cursor:not-allowed;
+  }
+
+  button.ghost{
+    background:transparent;
+    border:1px solid var(--line);
+    color:var(--text);
+    border-radius:7px;
+    padding:8px 12px;
+    font-size:12.5px;
+    cursor:pointer;
+    font-family:var(--sans);
+  }
+  button.ghost:hover{ border-color:var(--accent-dim); }
+
+  .panel-title{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .panel-title h2{
+    font-size:14px;
+    margin:0;
+    font-weight:600;
+  }
+  .panel-title .count{
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--text-dim);
+  }
+
+  .log{
+    background:#0a0c0d;
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:12px 14px;
+    height:170px;
+    overflow-y:auto;
+    font-family:var(--mono);
+    font-size:12.5px;
+    line-height:1.7;
+    color:#a9b3b8;
+  }
+  .log .line{ white-space:pre-wrap; word-break:break-word; }
+  .log .line .t{ color:#5b6469; margin-right:8px; }
+  .empty-state{
+    color:var(--text-dim);
+    font-size:13px;
+    text-align:center;
+    padding:36px 16px;
+    border:1px dashed var(--line);
+    border-radius:8px;
+  }
+
+  table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:13px;
+  }
+  thead th{
+    text-align:left;
+    font-weight:600;
+    color:var(--text-dim);
+    font-size:11.5px;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    padding:8px 10px;
+    border-bottom:1px solid var(--line);
+  }
+  tbody td{
+    padding:10px;
+    border-bottom:1px solid var(--line);
+    vertical-align:top;
+  }
+  tbody tr:last-child td{ border-bottom:none; }
+  .uname{ font-family:var(--mono); font-weight:600; }
+  .badge{
+    display:inline-block;
+    font-family:var(--mono);
+    font-size:11px;
+    padding:2px 7px;
+    border-radius:99px;
+    border:1px solid var(--line);
+  }
+  .badge.ok{ color:var(--ok); border-color:#245c3a; }
+  .badge.warn{ color:var(--warn); border-color:#5c4d23; }
+  .badge.err{ color:var(--err); border-color:#5c2b2b; }
+  .reel-list{ font-family:var(--mono); font-size:12px; }
+  .reel-list a{
+    color:var(--text);
+    display:block;
+    padding:2px 0;
+    text-decoration:none;
+    border-bottom:1px dotted #23282b;
+  }
+  .reel-list a:hover{ color:var(--accent); }
+  .reel-list .more{ color:var(--text-dim); margin-top:2px; }
+
+  .actions{
+    display:flex;
+    gap:10px;
+    margin-top:16px;
+  }
+
+  footer{
+    margin-top:28px;
+    color:var(--text-dim);
+    font-size:12px;
+    line-height:1.6;
+    border-top:1px solid var(--line);
+    padding-top:16px;
+  }
+  footer code{
+    font-family:var(--mono);
+    background:var(--panel-2);
+    padding:1px 5px;
+    border-radius:4px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="mark">◆</span>
+      <div>
+        <h1>Reel Reader</h1>
+      </div>
+    </div>
+    <div class="sub">Import a logged-in session, list target profiles, and pull every Reels URL from each — driven by Playwright on your own machine.</div>
+  </header>
+
+  <div class="grid">
+
+    <!-- LEFT: setup -->
+    <div>
+      <div class="panel">
+        <div class="panel-title"><h2>Session cookies</h2></div>
+
+        <label class="drop" id="dropZone" for="cookieFile">
+          <input type="file" id="cookieFile" accept="application/json,.json" />
+          <div>Drop <strong>cookie.json</strong> here, or click to browse</div>
+          <div class="hint">Exported from a browser cookie extension while logged in to instagram.com</div>
+          <div class="status" id="cookieStatus"></div>
+        </label>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title"><h2>Target profiles</h2></div>
+        <label class="field-label" for="usernames">One username per line (no need for @ or full URL)</label>
+        <textarea id="usernames" placeholder="nasa&#10;natgeo&#10;nike"></textarea>
+
+        <div class="row">
+          <div class="col">
+            <label class="field-label" for="maxReels">Max reels / profile</label>
+            <input type="number" id="maxReels" placeholder="unlimited" min="1" />
+          </div>
+          <div class="col">
+            <label class="field-label" for="maxScrolls">Max scroll passes</label>
+            <input type="number" id="maxScrolls" value="8" min="1" />
+          </div>
+        </div>
+
+        <label class="toggle">
+          <input type="checkbox" id="headless" checked />
+          Run headless (uncheck to watch the browser work)
+        </label>
+
+        <button class="primary" id="startBtn">Start scraping</button>
+      </div>
+    </div>
+
+    <!-- RIGHT: progress + results -->
+    <div>
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Progress</h2>
+          <span class="count" id="jobStatus">idle</span>
+        </div>
+        <div class="log" id="logBox">
+          <div class="line" style="color:#5b6469;">Waiting to start…</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Results</h2>
+          <span class="count" id="resultCount">0 profiles</span>
+        </div>
+        <div id="resultsArea">
+          <div class="empty-state">Reel URLs will appear here as each profile is scraped.</div>
+        </div>
+        <div class="actions" id="downloadActions" style="display:none;">
+          <button class="ghost" id="downloadJson">Download JSON</button>
+          <button class="ghost" id="downloadCsv">Download CSV</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer>
+    Runs entirely on your machine via a local Express + Playwright server. Nothing is sent anywhere except instagram.com.
+    Scraping Instagram may conflict with its Terms of Service — use your own account's session, keep request volume modest, and review the ToS before running this against accounts you don't own.
+    Start the server with <code>npm install && npm start</code>, then open <code>http://localhost:3000</code>.
+  </footer>
+
+</div>
+
+<script>
+  const dropZone = document.getElementById('dropZone');
+  const cookieFile = document.getElementById('cookieFile');
+  const cookieStatus = document.getElementById('cookieStatus');
+  const startBtn = document.getElementById('startBtn');
+  const logBox = document.getElementById('logBox');
+  const jobStatusEl = document.getElementById('jobStatus');
+  const resultsArea = document.getElementById('resultsArea');
+  const resultCount = document.getElementById('resultCount');
+  const downloadActions = document.getElementById('downloadActions');
+  const downloadJson = document.getElementById('downloadJson');
+  const downloadCsv = document.getElementById('downloadCsv');
+
+  let cookiesData = null;
+  let currentJobId = null;
+  let pollTimer = null;
+
+  // --- Cookie import ---
+  ['dragover', 'dragenter'].forEach(evt =>
+    dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.add('drag'); })
+  );
+  ['dragleave', 'drop'].forEach(evt =>
+    dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.remove('drag'); })
+  );
+  dropZone.addEventListener('drop', e => {
+    const file = e.dataTransfer.files[0];
+    if (file) readCookieFile(file);
+  });
+  cookieFile.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (file) readCookieFile(file);
+  });
+
+  function readCookieFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.cookies) ? parsed.cookies : null);
+        if (!arr) throw new Error('Expected a JSON array of cookie objects.');
+        const valid = arr.filter(c => c && c.name && c.domain);
+        if (valid.length === 0) throw new Error('No valid cookie objects found.');
+        cookiesData = valid;
+        cookieStatus.textContent = `✓ Loaded ${valid.length} cookies from ${file.name}`;
+        cookieStatus.className = 'status good';
+      } catch (err) {
+        cookiesData = null;
+        cookieStatus.textContent = `✗ ${err.message}`;
+        cookieStatus.className = 'status bad';
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // --- Logging helpers ---
+  function renderLog(entries) {
+    logBox.innerHTML = entries.map(e => {
+      const time = new Date(e.time).toLocaleTimeString();
+      return `<div class="line"><span class="t">${time}</span>${escapeHtml(e.message)}</div>`;
+    }).join('');
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  function statusBadge(status) {
+    const map = {
+      ok: ['ok', 'ok'],
+      no_reels_found: ['warn', 'no reels'],
+      private: ['warn', 'private'],
+      login_wall: ['err', 'login wall'],
+      not_found: ['err', 'not found'],
+      error: ['err', 'error'],
+    };
+    const [cls, label] = map[status] || ['warn', status];
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  function renderResults(results) {
+    resultCount.textContent = `${results.length} profile${results.length === 1 ? '' : 's'}`;
+    if (results.length === 0) {
+      resultsArea.innerHTML = '<div class="empty-state">Reel URLs will appear here as each profile is scraped.</div>';
+      return;
+    }
+    const rows = results.map(r => {
+      const preview = (r.reels || []).slice(0, 5);
+      const remaining = (r.reels || []).length - preview.length;
+      const links = preview.map(u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`).join('');
+      const more = remaining > 0 ? `<div class="more">+${remaining} more</div>` : '';
+      return `
+        <tr>
+          <td class="uname">@${escapeHtml(r.username)}</td>
+          <td>${statusBadge(r.status)}</td>
+          <td>${(r.reels || []).length}</td>
+          <td class="reel-list">${links || '<span style="color:var(--text-dim)">—</span>'}${more}</td>
+        </tr>`;
+    }).join('');
+
+    resultsArea.innerHTML = `
+      <table>
+        <thead>
+          <tr><th>Profile</th><th>Status</th><th>Count</th><th>Reel URLs</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // --- Job control ---
+  startBtn.addEventListener('click', async () => {
+    if (!cookiesData) {
+      cookieStatus.textContent = '✗ Import a cookie.json file first';
+      cookieStatus.className = 'status bad';
+      return;
+    }
+    const usernames = document.getElementById('usernames').value
+      .split('\n').map(s => s.trim()).filter(Boolean);
+    if (usernames.length === 0) {
+      alert('Add at least one target username.');
+      return;
+    }
+
+    const maxReels = parseInt(document.getElementById('maxReels').value, 10) || null;
+    const maxScrolls = parseInt(document.getElementById('maxScrolls').value, 10) || 8;
+    const headless = document.getElementById('headless').checked;
+
+    startBtn.disabled = true;
+    startBtn.textContent = 'Scraping…';
+    downloadActions.style.display = 'none';
+    resultsArea.innerHTML = '<div class="empty-state">Reel URLs will appear here as each profile is scraped.</div>';
+    resultCount.textContent = '0 profiles';
+
+    try {
+      const res = await fetch('/api/scrape/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies: cookiesData, usernames, maxReels, maxScrolls, headless }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start job');
+
+      currentJobId = data.jobId;
+      jobStatusEl.textContent = 'running';
+      pollTimer = setInterval(pollStatus, 1400);
+    } catch (err) {
+      alert(err.message);
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start scraping';
+    }
+  });
+
+  async function pollStatus() {
+    if (!currentJobId) return;
+    const res = await fetch(`/api/scrape/status/${currentJobId}`);
+    if (!res.ok) return;
+    const job = await res.json();
+
+    renderLog(job.log);
+    renderResults(job.results);
+    jobStatusEl.textContent = job.status;
+
+    if (job.status === 'done' || job.status === 'error') {
+      clearInterval(pollTimer);
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start scraping';
+      if (job.results.length > 0) downloadActions.style.display = 'flex';
+      if (job.status === 'error') {
+        jobStatusEl.style.color = 'var(--err)';
+      }
+    }
+  }
+
+  downloadJson.addEventListener('click', () => {
+    if (currentJobId) window.open(`/api/scrape/download/${currentJobId}?format=json`, '_blank');
+  });
+  downloadCsv.addEventListener('click', () => {
+    if (currentJobId) window.open(`/api/scrape/download/${currentJobId}?format=csv`, '_blank');
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: reel-reader
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard # headless Chromium wants more headroom than the free/starter 512MB tier
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      - key: AUTH_USER
+        sync: false # set in the Render dashboard — required to protect this publicly
+      - key: AUTH_PASS
+        sync: false
+      - key: PORT
+        value: 3000
