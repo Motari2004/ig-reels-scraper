@@ -10,122 +10,10 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============== CAPTION SERVICE INTEGRATION ==============
-
-const CAPTION_SERVICE_URL = process.env.CAPTION_SERVICE_URL || 'https://copytxt-caption-automation.onrender.com/api/caption';
-
 /**
- * Fetch caption for a single reel using the caption service
- */
-async function fetchCaptionFromService(reelUrl) {
-    try {
-        const response = await axios.post(CAPTION_SERVICE_URL, {
-            url: reelUrl
-        }, {
-            timeout: 30000,
-            headers: { 'Content-Type': 'application/json' }
-        });
-        
-        if (response.status === 200 && response.data && response.data.success) {
-            return response.data.caption || '';
-        }
-        return '';
-    } catch (error) {
-        console.error(`[Caption] Error fetching caption for ${reelUrl}:`, error.message);
-        return '';
-    }
-}
-
-/**
- * Fetch captions for multiple reels in batch
- */
-async function fetchCaptionsBatch(reelUrls) {
-    try {
-        const response = await axios.post(`${CAPTION_SERVICE_URL}/batch`, {
-            urls: reelUrls
-        }, {
-            timeout: 60000,
-            headers: { 'Content-Type': 'application/json' }
-        });
-        
-        if (response.status === 200 && response.data && response.data.success) {
-            const results = {};
-            for (const item of response.data.results || []) {
-                if (item.success) {
-                    results[item.url] = item.caption || '';
-                }
-            }
-            return results;
-        }
-        return {};
-    } catch (error) {
-        console.error(`[Caption] Batch error:`, error.message);
-        return {};
-    }
-}
-
-/**
- * Process reels with captions
- */
-async function processReelsWithCaptions(reels, username) {
-    const processedReels = [];
-    const urlsToFetch = [];
-    
-    // Separate reels that already have captions from those that don't
-    for (const reel of reels) {
-        if (typeof reel === 'string') {
-            urlsToFetch.push(reel);
-            processedReels.push({ url: reel, caption: '' });
-        } else if (typeof reel === 'object' && reel.url) {
-            if (reel.caption && reel.caption.trim().length > 0) {
-                // Already has caption
-                processedReels.push(reel);
-            } else {
-                urlsToFetch.push(reel.url);
-                processedReels.push({ url: reel.url, caption: '' });
-            }
-        }
-    }
-    
-    if (urlsToFetch.length === 0) {
-        return processedReels;
-    }
-    
-    console.log(`[Caption] Fetching ${urlsToFetch.length} captions for @${username}...`);
-    
-    // Fetch in batches of 5 to avoid overwhelming the service
-    const batchSize = 5;
-    const captionsMap = {};
-    
-    for (let i = 0; i < urlsToFetch.length; i += batchSize) {
-        const batch = urlsToFetch.slice(i, i + batchSize);
-        const batchResults = await fetchCaptionsBatch(batch);
-        
-        for (const [url, caption] of Object.entries(batchResults)) {
-            captionsMap[url] = caption;
-        }
-        
-        // Small delay between batches
-        if (i + batchSize < urlsToFetch.length) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-    }
-    
-    // Add captions to processed reels
-    for (const reel of processedReels) {
-        if (captionsMap[reel.url]) {
-            reel.caption = captionsMap[reel.url];
-        }
-    }
-    
-    const withCaptions = processedReels.filter(r => r.caption && r.caption.trim().length > 0);
-    console.log(`[Caption] Got ${withCaptions.length}/${processedReels.length} captions for @${username}`);
-    
-    return processedReels;
-}
-
-/**
- * Optional HTTP Basic Auth
+ * Optional HTTP Basic Auth. Disabled (no-op) unless both AUTH_USER and AUTH_PASS
+ * are set — which they should be for any deployment reachable outside localhost,
+ * since this app accepts session cookies and can trigger outbound scraping.
  */
 function timingSafeStringEqual(a, b) {
   const bufA = Buffer.from(a);
@@ -137,7 +25,7 @@ function timingSafeStringEqual(a, b) {
 function basicAuth(req, res, next) {
   const expectedUser = process.env.AUTH_USER;
   const expectedPass = process.env.AUTH_PASS;
-  if (!expectedUser || !expectedPass) return next();
+  if (!expectedUser || !expectedPass) return next(); // auth not configured — allow through
 
   const header = req.headers.authorization || '';
   const [scheme, encoded] = header.split(' ');
@@ -175,7 +63,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 /** @type {Map<string, {id:string,status:string,log:Array,results:Array,error:string|null,startedAt:number,vercel:{sent:boolean,count:number}}>} */
 const jobs = new Map();
 
-// Drop jobs older than 2 hours
+// Drop jobs older than 2 hours so memory doesn't grow forever in long-running sessions.
 setInterval(() => {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   for (const [id, job] of jobs) {
@@ -191,34 +79,25 @@ const VERCEL_API_KEY = process.env.VERCEL_API_KEY || '';
 
 async function sendReelsToVercel(jobId, results) {
   try {
-    // 🔥 Process results with captions
-    const processedResults = [];
-    let totalWithCaptions = 0;
-    
+    // Extract all reel URLs from the results
+    const allReelUrls = [];
     for (const profile of results) {
       if (profile.reels && profile.reels.length > 0) {
-        // Fetch captions for this profile's reels
-        const reelsWithCaptions = await processReelsWithCaptions(profile.reels, profile.username);
-        const withCaptions = reelsWithCaptions.filter(r => r.caption && r.caption.trim().length > 0);
-        totalWithCaptions += withCaptions.length;
-        
-        processedResults.push({
-          username: profile.username,
-          status: profile.status,
-          reels: reelsWithCaptions
-        });
-      } else {
-        processedResults.push(profile);
+        allReelUrls.push(...profile.reels);
       }
     }
 
-    console.log(`[Job ${jobId}] Found ${totalWithCaptions} reels with captions`);
+    if (allReelUrls.length === 0) {
+      console.log(`[Job ${jobId}] No reels found to send to Vercel.`);
+      return { sent: false, count: 0, message: 'No reels to send' };
+    }
 
-    const payload = {
-      results: processedResults,
+    console.log(`[Job ${jobId}] Sending ${allReelUrls.length} reels to Vercel...`);
+
+    const payload = { 
+      reels: allReelUrls,
       job_id: jobId,
-      timestamp: new Date().toISOString(),
-      captions_fetched: totalWithCaptions
+      timestamp: new Date().toISOString()
     };
 
     const headers = {
@@ -226,34 +105,64 @@ async function sendReelsToVercel(jobId, results) {
       'User-Agent': 'IG-Reels-Scraper/1.0'
     };
 
+    // Add API key if configured
     if (VERCEL_API_KEY) {
       headers['X-API-Key'] = VERCEL_API_KEY;
     }
 
-    // Send to storage endpoint
+    // Send to process-reels endpoint (for generating download URLs)
+    let processResponse = null;
+    try {
+      processResponse = await axios.post(VERCEL_WEBHOOK_URL, payload, {
+        headers: headers,
+        timeout: 120000 // 2 minutes timeout for processing many URLs
+      });
+      console.log(`[Job ${jobId}] Successfully sent to Vercel process endpoint.`);
+    } catch (error) {
+      console.error(`[Job ${jobId}] Failed to send to Vercel process endpoint:`, error.message);
+      if (error.response) {
+        console.error(`[Job ${jobId}] Response:`, error.response.status, error.response.data);
+      }
+    }
+
+    // Send to storage endpoint (for storing results)
     let storageResponse = null;
     try {
-      storageResponse = await axios.post(VERCEL_STORAGE_URL, payload, {
+      const storagePayload = {
+        results: results,
+        job_id: jobId,
+        timestamp: new Date().toISOString()
+      };
+      
+      storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
         headers: headers,
-        timeout: 60000
+        timeout: 30000
       });
-      console.log(`[Job ${jobId}] Stored results on Vercel with captions.`);
+      console.log(`[Job ${jobId}] Stored results on Vercel storage.`);
     } catch (error) {
       console.error(`[Job ${jobId}] Failed to store results on Vercel:`, error.message);
+      if (error.response) {
+        console.error(`[Job ${jobId}] Response:`, error.response.status, error.response.data);
+      }
     }
     
     return {
       sent: true,
-      count: totalWithCaptions,
-      message: `Sent ${totalWithCaptions} reels with captions to Vercel`,
+      count: allReelUrls.length,
+      message: `Sent ${allReelUrls.length} reels to Vercel`,
+      process_status: processResponse ? processResponse.status : null,
       storage_status: storageResponse ? storageResponse.status : null
     };
   } catch (error) {
     console.error(`[Job ${jobId}] Failed to send results to Vercel:`, error.message);
+    if (error.response) {
+      console.error(`[Job ${jobId}] Vercel responded with:`, error.response.status, error.response.data);
+    }
     return {
       sent: false,
       count: 0,
-      error: error.message
+      error: error.message,
+      details: error.response ? error.response.data : null
     };
   }
 }
@@ -261,7 +170,7 @@ async function sendReelsToVercel(jobId, results) {
 // ============== ROUTES ==============
 
 app.post('/api/scrape/start', (req, res) => {
-  const { cookies, usernames, maxReels, maxScrolls, headless, sendToVercel, fetchCaptions } = req.body || {};
+  const { cookies, usernames, maxReels, maxScrolls, headless, sendToVercel } = req.body || {};
 
   if (!Array.isArray(cookies) || cookies.length === 0) {
     return res.status(400).json({ error: 'cookies (from cookie.json) are required' });
@@ -282,10 +191,8 @@ app.post('/api/scrape/start', (req, res) => {
   };
   jobs.set(jobId, job);
 
-  const shouldSendToVercel = sendToVercel !== false;
-  const shouldFetchCaptions = fetchCaptions !== false;
-
-  job.log.push({ time: Date.now(), message: `📝 Fetch captions: ${shouldFetchCaptions ? 'Yes' : 'No'}` });
+  // Store whether to send to Vercel
+  const shouldSendToVercel = sendToVercel !== false; // Default: true
 
   scrapeProfiles(
     cookies,
@@ -293,27 +200,21 @@ app.post('/api/scrape/start', (req, res) => {
     { maxReels, maxScrolls, headless: headless !== false },
     (message, result) => {
       job.log.push({ time: Date.now(), message });
-      if (result) {
-        job.results.push({
-          username: result.username,
-          status: result.status,
-          reels: result.reels || []
-        });
-      }
+      if (result) job.results.push(result);
     }
   )
     .then(async () => {
       job.status = 'done';
       job.log.push({ time: Date.now(), message: '✅ Scraping completed' });
       
-      // Send results to Vercel (this will fetch captions)
+      // Send results to Vercel if enabled
       if (shouldSendToVercel) {
-        job.log.push({ time: Date.now(), message: '📤 Sending results to Vercel with captions...' });
+        job.log.push({ time: Date.now(), message: '📤 Sending results to Vercel...' });
         const result = await sendReelsToVercel(jobId, job.results);
         job.vercel = result;
         
         if (result.sent) {
-          job.log.push({ time: Date.now(), message: `✅ Sent ${result.count} reels with captions to Vercel` });
+          job.log.push({ time: Date.now(), message: `✅ Sent ${result.count} reels to Vercel` });
         } else {
           job.log.push({ time: Date.now(), message: `❌ Failed to send to Vercel: ${result.error || 'Unknown error'}` });
         }
@@ -330,7 +231,6 @@ app.post('/api/scrape/start', (req, res) => {
   res.json({ 
     jobId,
     vercel_enabled: shouldSendToVercel,
-    fetch_captions: shouldFetchCaptions,
     vercel_webhook: shouldSendToVercel ? VERCEL_WEBHOOK_URL : null
   });
 });
@@ -339,6 +239,7 @@ app.get('/api/scrape/status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'job not found' });
   
+  // Return a clean response
   res.json({
     id: job.id,
     status: job.status,
@@ -357,15 +258,13 @@ app.get('/api/scrape/download/:jobId', (req, res) => {
   const format = (req.query.format || 'json').toLowerCase();
 
   if (format === 'csv') {
-    let csv = 'username,status,reel_url,caption\n';
+    let csv = 'username,status,reel_url\n';
     for (const r of job.results) {
       if (!r.reels || r.reels.length === 0) {
-        csv += `${r.username},${r.status},,\n`;
+        csv += `${r.username},${r.status},\n`;
       } else {
-        for (const reel of r.reels) {
-          const url = typeof reel === 'string' ? reel : reel.url || reel;
-          const caption = typeof reel === 'object' ? (reel.caption || '').replace(/"/g, '""') : '';
-          csv += `${r.username},${r.status},${url},"${caption}"\n`;
+        for (const url of r.reels) {
+          csv += `${r.username},${r.status},${url}\n`;
         }
       }
     }
@@ -384,12 +283,11 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'IG Reels Scraper',
-    version: '1.1.0',
+    version: '1.0.0',
     uptime: process.uptime(),
     vercel_webhook_configured: !!VERCEL_WEBHOOK_URL,
     vercel_storage_configured: !!VERCEL_STORAGE_URL,
-    active_jobs: jobs.size,
-    caption_service: CAPTION_SERVICE_URL
+    active_jobs: jobs.size
   });
 });
 
@@ -423,5 +321,4 @@ app.listen(PORT, () => {
   console.log(`Vercel webhook: ${VERCEL_WEBHOOK_URL || 'Not configured'}`);
   console.log(`Vercel storage: ${VERCEL_STORAGE_URL || 'Not configured'}`);
   console.log(`Vercel API Key: ${VERCEL_API_KEY ? 'Configured ✓' : 'Not configured'}`);
-  console.log(`Caption service: ${CAPTION_SERVICE_URL}`);
 });
