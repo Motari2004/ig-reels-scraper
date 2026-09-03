@@ -10,21 +10,11 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============== 📝 ENHANCED LOGGING ==============
-
-function logWithTimestamp(level, message, data = null) {
-  const timestamp = new Date().toISOString();
-  const logEntry = {
-    timestamp,
-    level,
-    message,
-    ...(data && { data })
-  };
-  console.log(JSON.stringify(logEntry));
-}
-
-// ============== AUTH ==============
-
+/**
+ * Optional HTTP Basic Auth. Disabled (no-op) unless both AUTH_USER and AUTH_PASS
+ * are set — which they should be for any deployment reachable outside localhost,
+ * since this app accepts session cookies and can trigger outbound scraping.
+ */
 function timingSafeStringEqual(a, b) {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
@@ -35,7 +25,7 @@ function timingSafeStringEqual(a, b) {
 function basicAuth(req, res, next) {
   const expectedUser = process.env.AUTH_USER;
   const expectedPass = process.env.AUTH_PASS;
-  if (!expectedUser || !expectedPass) return next();
+  if (!expectedUser || !expectedPass) return next(); // auth not configured — allow through
 
   const header = req.headers.authorization || '';
   const [scheme, encoded] = header.split(' ');
@@ -70,11 +60,10 @@ app.use(basicAuth);
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ============== JOB STORAGE ==============
-
 /** @type {Map<string, {id:string,status:string,log:Array,results:Array,error:string|null,startedAt:number,vercel:{sent:boolean,count:number}}>} */
 const jobs = new Map();
 
+// Drop jobs older than 2 hours so memory doesn't grow forever in long-running sessions.
 setInterval(() => {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   for (const [id, job] of jobs) {
@@ -89,98 +78,54 @@ const VERCEL_STORAGE_URL = process.env.VERCEL_STORAGE_URL || 'https://fetchgram-
 const VERCEL_API_KEY = process.env.VERCEL_API_KEY || '';
 
 async function sendReelsToVercel(jobId, results) {
-  logWithTimestamp('INFO', `📤 sendReelsToVercel called for job ${jobId}`, {
-    resultsCount: results ? results.length : 0
-  });
-
   try {
     // Extract all reel URLs from the results
     const allReelUrls = [];
-    let totalProfiles = 0;
-    let profilesWithReels = 0;
-
     for (const profile of results) {
-      totalProfiles++;
       if (profile.reels && profile.reels.length > 0) {
-        profilesWithReels++;
-        logWithTimestamp('DEBUG', `Profile ${profile.username} has ${profile.reels.length} reels`, {
-          username: profile.username,
-          reelCount: profile.reels.length,
-          status: profile.status
-        });
-        
-        // Log first few reels for debugging
-        const sampleReels = profile.reels.slice(0, 3);
-        logWithTimestamp('DEBUG', `Sample reels for ${profile.username}`, {
-          sampleReels
-        });
-        
         allReelUrls.push(...profile.reels);
-      } else {
-        logWithTimestamp('WARN', `Profile ${profile.username} has no reels`, {
-          username: profile.username,
-          status: profile.status,
-          reels: profile.reels
-        });
       }
     }
 
-    logWithTimestamp('INFO', `📊 Job ${jobId} summary`, {
-      totalProfiles,
-      profilesWithReels,
-      totalReels: allReelUrls.length,
-      firstReel: allReelUrls.length > 0 ? allReelUrls[0] : null
-    });
-
     if (allReelUrls.length === 0) {
-      logWithTimestamp('WARN', `[Job ${jobId}] No reels found to send to Vercel.`);
+      console.log(`[Job ${jobId}] No reels found to send to Vercel.`);
       return { sent: false, count: 0, message: 'No reels to send' };
     }
 
-    logWithTimestamp('INFO', `[Job ${jobId}] Sending ${allReelUrls.length} reels to Vercel...`);
+    console.log(`[Job ${jobId}] Sending ${allReelUrls.length} reels to Vercel...`);
 
     const payload = { 
       reels: allReelUrls,
       job_id: jobId,
-      timestamp: new Date().toISOString(),
-      profileCount: totalProfiles,
-      reelCount: allReelUrls.length
+      timestamp: new Date().toISOString()
     };
-
-    logWithTimestamp('DEBUG', `[Job ${jobId}] Payload to Vercel`, {
-      jobId,
-      reelCount: allReelUrls.length,
-      payloadSize: JSON.stringify(payload).length
-    });
 
     const headers = {
       'Content-Type': 'application/json',
       'User-Agent': 'IG-Reels-Scraper/1.0'
     };
 
+    // Add API key if configured
     if (VERCEL_API_KEY) {
       headers['X-API-Key'] = VERCEL_API_KEY;
-      logWithTimestamp('DEBUG', `[Job ${jobId}] Using Vercel API Key`);
     }
 
-    // Send to process-reels endpoint
+    // Send to process-reels endpoint (for generating download URLs)
     let processResponse = null;
     try {
-      logWithTimestamp('INFO', `[Job ${jobId}] Sending to Vercel process endpoint: ${VERCEL_WEBHOOK_URL}`);
       processResponse = await axios.post(VERCEL_WEBHOOK_URL, payload, {
         headers: headers,
-        timeout: 120000
+        timeout: 120000 // 2 minutes timeout for processing many URLs
       });
-      logWithTimestamp('INFO', `[Job ${jobId}] Vercel process endpoint responded with status ${processResponse.status}`);
+      console.log(`[Job ${jobId}] Successfully sent to Vercel process endpoint.`);
     } catch (error) {
-      logWithTimestamp('ERROR', `[Job ${jobId}] Failed to send to Vercel process endpoint`, {
-        message: error.message,
-        status: error.response?.status,
-        data: error.response?.data
-      });
+      console.error(`[Job ${jobId}] Failed to send to Vercel process endpoint:`, error.message);
+      if (error.response) {
+        console.error(`[Job ${jobId}] Response:`, error.response.status, error.response.data);
+      }
     }
 
-    // Send to storage endpoint
+    // Send to storage endpoint (for storing results)
     let storageResponse = null;
     try {
       const storagePayload = {
@@ -189,18 +134,16 @@ async function sendReelsToVercel(jobId, results) {
         timestamp: new Date().toISOString()
       };
       
-      logWithTimestamp('INFO', `[Job ${jobId}] Sending to Vercel storage endpoint: ${VERCEL_STORAGE_URL}`);
       storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
         headers: headers,
         timeout: 30000
       });
-      logWithTimestamp('INFO', `[Job ${jobId}] Vercel storage endpoint responded with status ${storageResponse.status}`);
+      console.log(`[Job ${jobId}] Stored results on Vercel storage.`);
     } catch (error) {
-      logWithTimestamp('ERROR', `[Job ${jobId}] Failed to store results on Vercel`, {
-        message: error.message,
-        status: error.response?.status,
-        data: error.response?.data
-      });
+      console.error(`[Job ${jobId}] Failed to store results on Vercel:`, error.message);
+      if (error.response) {
+        console.error(`[Job ${jobId}] Response:`, error.response.status, error.response.data);
+      }
     }
     
     return {
@@ -211,10 +154,10 @@ async function sendReelsToVercel(jobId, results) {
       storage_status: storageResponse ? storageResponse.status : null
     };
   } catch (error) {
-    logWithTimestamp('ERROR', `[Job ${jobId}] sendReelsToVercel error`, {
-      message: error.message,
-      stack: error.stack
-    });
+    console.error(`[Job ${jobId}] Failed to send results to Vercel:`, error.message);
+    if (error.response) {
+      console.error(`[Job ${jobId}] Vercel responded with:`, error.response.status, error.response.data);
+    }
     return {
       sent: false,
       count: 0,
@@ -229,27 +172,14 @@ async function sendReelsToVercel(jobId, results) {
 app.post('/api/scrape/start', (req, res) => {
   const { cookies, usernames, maxReels, maxScrolls, headless, sendToVercel } = req.body || {};
 
-  logWithTimestamp('INFO', '📥 Received scrape request', {
-    usernames,
-    maxReels,
-    maxScrolls,
-    headless,
-    sendToVercel,
-    cookiesCount: cookies ? cookies.length : 0
-  });
-
   if (!Array.isArray(cookies) || cookies.length === 0) {
-    logWithTimestamp('ERROR', 'No cookies provided', { cookies });
     return res.status(400).json({ error: 'cookies (from cookie.json) are required' });
   }
   if (!Array.isArray(usernames) || usernames.filter((u) => u && u.trim()).length === 0) {
-    logWithTimestamp('ERROR', 'No usernames provided', { usernames });
     return res.status(400).json({ error: 'at least one target username is required' });
   }
 
   const jobId = uuidv4();
-  logWithTimestamp('INFO', `📋 Created job ${jobId}`);
-
   const job = {
     id: jobId,
     status: 'running',
@@ -261,9 +191,8 @@ app.post('/api/scrape/start', (req, res) => {
   };
   jobs.set(jobId, job);
 
-  const shouldSendToVercel = sendToVercel !== false;
-
-  logWithTimestamp('INFO', `🚀 Starting scrapeProfiles for job ${jobId}`);
+  // Store whether to send to Vercel
+  const shouldSendToVercel = sendToVercel !== false; // Default: true
 
   scrapeProfiles(
     cookies,
@@ -271,54 +200,32 @@ app.post('/api/scrape/start', (req, res) => {
     { maxReels, maxScrolls, headless: headless !== false },
     (message, result) => {
       job.log.push({ time: Date.now(), message });
-      if (result) {
-        logWithTimestamp('DEBUG', `📊 Scrape progress: ${message}`, {
-          username: result.username,
-          status: result.status,
-          reelCount: result.reels ? result.reels.length : 0
-        });
-        job.results.push(result);
-      } else {
-        logWithTimestamp('DEBUG', `📊 Scrape progress: ${message}`);
-      }
+      if (result) job.results.push(result);
     }
   )
     .then(async () => {
       job.status = 'done';
-      logWithTimestamp('INFO', `✅ Job ${jobId} completed`, {
-        resultsCount: job.results.length,
-        allResults: job.results
-      });
-      
       job.log.push({ time: Date.now(), message: '✅ Scraping completed' });
       
+      // Send results to Vercel if enabled
       if (shouldSendToVercel) {
         job.log.push({ time: Date.now(), message: '📤 Sending results to Vercel...' });
-        logWithTimestamp('INFO', `📤 Sending job ${jobId} results to Vercel`);
         const result = await sendReelsToVercel(jobId, job.results);
         job.vercel = result;
         
         if (result.sent) {
           job.log.push({ time: Date.now(), message: `✅ Sent ${result.count} reels to Vercel` });
-          logWithTimestamp('INFO', `✅ Successfully sent ${result.count} reels to Vercel for job ${jobId}`);
         } else {
-          const errorMsg = result.error || 'Unknown error';
-          job.log.push({ time: Date.now(), message: `❌ Failed to send to Vercel: ${errorMsg}` });
-          logWithTimestamp('ERROR', `❌ Failed to send job ${jobId} to Vercel`, { error: errorMsg });
+          job.log.push({ time: Date.now(), message: `❌ Failed to send to Vercel: ${result.error || 'Unknown error'}` });
         }
       } else {
         job.log.push({ time: Date.now(), message: 'ℹ️ Skipped sending to Vercel (disabled)' });
-        logWithTimestamp('INFO', `ℹ️ Skipped sending job ${jobId} to Vercel (disabled)`);
       }
     })
     .catch((err) => {
       job.status = 'error';
       job.error = err.message;
       job.log.push({ time: Date.now(), message: `❌ Fatal error: ${err.message}` });
-      logWithTimestamp('ERROR', `❌ Job ${jobId} failed`, {
-        error: err.message,
-        stack: err.stack
-      });
     });
 
   res.json({ 
@@ -330,16 +237,9 @@ app.post('/api/scrape/start', (req, res) => {
 
 app.get('/api/scrape/status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) {
-    logWithTimestamp('WARN', `Job ${req.params.jobId} not found`);
-    return res.status(404).json({ error: 'job not found' });
-  }
+  if (!job) return res.status(404).json({ error: 'job not found' });
   
-  logWithTimestamp('DEBUG', `Status check for job ${req.params.jobId}`, {
-    status: job.status,
-    resultsCount: job.results.length
-  });
-
+  // Return a clean response
   res.json({
     id: job.id,
     status: job.status,
@@ -353,13 +253,9 @@ app.get('/api/scrape/status/:jobId', (req, res) => {
 
 app.get('/api/scrape/download/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) {
-    logWithTimestamp('WARN', `Job ${req.params.jobId} not found for download`);
-    return res.status(404).json({ error: 'job not found' });
-  }
+  if (!job) return res.status(404).json({ error: 'job not found' });
 
   const format = (req.query.format || 'json').toLowerCase();
-  logWithTimestamp('INFO', `Downloading job ${req.params.jobId} in ${format} format`);
 
   if (format === 'csv') {
     let csv = 'username,status,reel_url\n';
@@ -382,13 +278,8 @@ app.get('/api/scrape/download/:jobId', (req, res) => {
   res.send(JSON.stringify(job.results, null, 2));
 });
 
+// Health check endpoint
 app.get('/api/health', (req, res) => {
-  logWithTimestamp('DEBUG', 'Health check', {
-    uptime: process.uptime(),
-    activeJobs: jobs.size,
-    vercelStorage: !!VERCEL_STORAGE_URL
-  });
-
   res.json({
     status: 'healthy',
     service: 'IG Reels Scraper',
@@ -400,6 +291,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Get latest job results
 app.get('/api/scrape/latest', (req, res) => {
   let latestJob = null;
   let latestTime = 0;
@@ -412,14 +304,9 @@ app.get('/api/scrape/latest', (req, res) => {
   }
   
   if (!latestJob) {
-    logWithTimestamp('WARN', 'No completed jobs found for latest request');
     return res.status(404).json({ error: 'No completed jobs found' });
   }
   
-  logWithTimestamp('INFO', `Returning latest job ${latestJob.id}`, {
-    resultsCount: latestJob.results.length
-  });
-
   res.json({
     id: latestJob.id,
     status: latestJob.status,
@@ -430,31 +317,8 @@ app.get('/api/scrape/latest', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  logWithTimestamp('INFO', `IG Reels Scraper running at http://localhost:${PORT}`, {
-    port: PORT,
-    vercelWebhook: VERCEL_WEBHOOK_URL || 'Not configured',
-    vercelStorage: VERCEL_STORAGE_URL || 'Not configured',
-    vercelApiKey: VERCEL_API_KEY ? 'Configured ✓' : 'Not configured'
-  });
-  
   console.log(`IG Reels Scraper running at http://localhost:${PORT}`);
   console.log(`Vercel webhook: ${VERCEL_WEBHOOK_URL || 'Not configured'}`);
   console.log(`Vercel storage: ${VERCEL_STORAGE_URL || 'Not configured'}`);
   console.log(`Vercel API Key: ${VERCEL_API_KEY ? 'Configured ✓' : 'Not configured'}`);
-});
-
-// ============== ERROR HANDLING ==============
-
-process.on('uncaughtException', (error) => {
-  logWithTimestamp('FATAL', 'Uncaught Exception', {
-    message: error.message,
-    stack: error.stack
-  });
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  logWithTimestamp('FATAL', 'Unhandled Rejection', {
-    reason: reason,
-    promise: promise
-  });
 });
