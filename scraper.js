@@ -39,6 +39,7 @@ function normalizeCookies(rawCookies) {
       const rawSameSite = (c.sameSite || 'lax').toString().toLowerCase();
       cookie.sameSite = sameSiteMap[rawSameSite] || 'Lax';
 
+      // Playwright rejects sameSite=None cookies that aren't marked secure.
       if (cookie.sameSite === 'None') cookie.secure = true;
 
       return cookie;
@@ -53,104 +54,22 @@ function randomDelay(minMs, maxMs) {
   return sleep(minMs + Math.random() * (maxMs - minMs));
 }
 
-// ============== 🔥 NEW: Get Reels WITH Captions in One Pass ==============
-
 /**
- * Scroll the reels grid, collecting /reel/ links AND their captions as they load.
- * Returns: [{ url: "...", caption: "..." }, ...]
+ * Scroll the reels grid, collecting /reel/ links as they load.
  */
-async function collectReelData(page, { maxReels, maxScrolls }) {
-  // Use Map to store unique reels by URL
-  const seen = new Map();
+async function collectReelUrls(page, { maxReels, maxScrolls }) {
+  const seen = new Set();
 
   const scrapeVisible = async () => {
-    // Get ALL reel data in one go - URL + Caption
-    const reelData = await page.$$eval('a[href*="/reel/"]', (links) => {
-      return links.map((link) => {
-        const href = link.getAttribute('href');
-        
-        // Try multiple ways to find the caption text
-        let caption = '';
-        
-        // Method 1: Find the closest article container
-        let container = link.closest('article');
-        if (!container) container = link.closest('div[role="article"]');
-        if (!container) container = link.closest('div[class*="x1yztbdb"]');
-        if (!container) container = link.parentElement;
-        
-        if (container) {
-          // Try different selectors that might contain the caption
-          const captionSelectors = [
-            'h1',
-            'h1 span',
-            'div[class*="x1n2onr6"]',
-            'div[class*="_a9zr"]',
-            'span[class*="x1lliihq"]',
-            'div[class*="x1iorvi4"]',
-            'div[class*="x1uvtmcs"]'
-          ];
-          
-          for (const selector of captionSelectors) {
-            try {
-              const el = container.querySelector(selector);
-              if (el && el.textContent) {
-                const text = el.textContent.trim();
-                // Only accept if it's a reasonable length (not just a number or short text)
-                if (text.length > 5 && !/^[0-9,]+$/.test(text)) {
-                  caption = text;
-                  break;
-                }
-              }
-            } catch (e) {
-              // Ignore selector errors
-            }
-          }
-          
-          // If still no caption, try to get it from the article's text
-          if (!caption) {
-            try {
-              const articleText = container.textContent || '';
-              // Look for caption patterns - often after the video thumbnail
-              const lines = articleText.split('\n').map(l => l.trim()).filter(l => l.length > 10);
-              // The caption is usually the first meaningful text line after the video
-              if (lines.length > 0) {
-                // Skip lines that look like dates, numbers, or usernames
-                for (const line of lines) {
-                  if (!/^[0-9,]+$/.test(line) && 
-                      !/^[0-9]+[smh]$/.test(line) && 
-                      !line.startsWith('@') &&
-                      !/^[0-9]+\s+[a-z]+$/.test(line) &&
-                      line.length > 3) {
-                    caption = line;
-                    break;
-                  }
-                }
-              }
-            } catch (e) {}
-          }
-        }
-        
-        return { href, caption };
-      });
-    });
-
-    // Add to seen map, keeping the first caption found
-    for (const { href, caption } of reelData) {
-      if (href) {
-        const fullUrl = href.startsWith('http') ? href : `https://www.instagram.com${href}`;
-        const cleanUrl = fullUrl.split('?')[0];
-        if (!seen.has(cleanUrl)) {
-          seen.set(cleanUrl, { url: cleanUrl, caption: caption || '' });
-        } else if (caption && !seen.get(cleanUrl).caption) {
-          // Update if we found a caption for an existing entry
-          const existing = seen.get(cleanUrl);
-          seen.set(cleanUrl, { ...existing, caption });
-        }
-      }
+    const hrefs = await page.$$eval('a[href*="/reel/"]', (as) =>
+      as.map((a) => a.getAttribute('href')).filter(Boolean)
+    );
+    for (const href of hrefs) {
+      const full = href.startsWith('http') ? href : `https://www.instagram.com${href}`;
+      seen.add(full.split('?')[0]);
     }
   };
 
-  // Initial scrape
   await scrapeVisible();
 
   let previousHeight = 0;
@@ -166,20 +85,18 @@ async function collectReelData(page, { maxReels, maxScrolls }) {
     const currentHeight = await page.evaluate(() => document.body.scrollHeight);
     if (currentHeight === previousHeight) {
       stableRounds += 1;
-      if (stableRounds >= 2) break;
+      if (stableRounds >= 2) break; // grid stopped growing, likely reached the end
     } else {
       stableRounds = 0;
     }
     previousHeight = currentHeight;
   }
 
-  const results = Array.from(seen.values());
-  return maxReels ? results.slice(0, maxReels) : results;
+  const urls = [...seen];
+  return maxReels ? urls.slice(0, maxReels) : urls;
 }
 
-// ============== PROFILE SCRAPING ==============
-
-async function scrapeOneProfile(context, username, options, onProgress) {
+async function scrapeOneProfile(context, username, options) {
   const page = await context.newPage();
   try {
     const cleanUsername = username.trim().replace(/^@/, '');
@@ -206,40 +123,21 @@ async function scrapeOneProfile(context, username, options, onProgress) {
       return { username: cleanUsername, status: 'not_found', reels: [] };
     }
 
-    // 🔥 NEW: Get reels WITH captions
-    const reelsWithData = await collectReelData(page, options);
-    
-    // Count how many have captions
-    const withCaptions = reelsWithData.filter(r => r.caption && r.caption.trim().length > 0);
-    
-    if (onProgress) {
-      onProgress(`✅ @${cleanUsername}: ${reelsWithData.length} reels, ${withCaptions.length} with captions`, null);
-    }
-    
-    // Extract just the URLs for backward compatibility (reels array)
-    const reelUrls = reelsWithData.map(r => r.url);
-    
+    const reels = await collectReelUrls(page, options);
     return {
       username: cleanUsername,
-      status: reelUrls.length ? 'ok' : 'no_reels_found',
-      reels: reelUrls,
-      reels_with_captions: reelsWithData, // 🔥 NEW: Full data with captions
+      status: reels.length ? 'ok' : 'no_reels_found',
+      reels,
     };
   } catch (err) {
-    return { 
-      username: username.trim().replace(/^@/, ''), 
-      status: 'error', 
-      error: err.message, 
-      reels: [],
-      reels_with_captions: []
-    };
+    return { username: username.trim().replace(/^@/, ''), status: 'error', error: err.message, reels: [] };
   } finally {
     await page.close().catch(() => {});
   }
 }
 
 /**
- * Run the full scrape job with captions.
+ * Run the full scrape job.
  * @param {Array} cookies - raw cookie objects from cookie.json
  * @param {Array<string>} usernames
  * @param {{maxReels?: number, maxScrolls?: number, headless?: boolean}} options
@@ -252,7 +150,7 @@ async function scrapeProfiles(cookies, usernames, options, onProgress) {
     headless: options.headless !== false,
   };
 
-  onProgress(`🚀 Launching browser (headless: ${opts.headless})`, null);
+  onProgress(`Launching browser (headless: ${opts.headless})`, null);
   const browser = await chromium.launch({ headless: opts.headless });
 
   try {
@@ -267,39 +165,35 @@ async function scrapeProfiles(cookies, usernames, options, onProgress) {
       throw new Error('No valid cookies found after normalizing cookie.json — check the file format.');
     }
     await context.addCookies(normalized);
-    onProgress(`🍪 Loaded ${normalized.length} cookies into the browser session`, null);
+    onProgress(`Loaded ${normalized.length} cookies into the browser session`, null);
 
     for (let i = 0; i < usernames.length; i++) {
       const username = usernames[i];
       if (!username || !username.trim()) continue;
 
-      const cleanUser = username.trim().replace(/^@/, '');
-      onProgress(`(${i + 1}/${usernames.length}) Scraping @${cleanUser}…`, null);
-      
-      const result = await scrapeOneProfile(context, username, opts, onProgress);
+      onProgress(`(${i + 1}/${usernames.length}) Scraping @${username.trim().replace(/^@/, '')}…`, null);
+      const result = await scrapeOneProfile(context, username, opts);
 
       if (result.status === 'ok') {
-        const withCaptions = result.reels_with_captions?.filter(r => r.caption) || [];
-        const captionCount = withCaptions.filter(r => r.caption && r.caption.trim().length > 0).length;
-        onProgress(`✅ @${result.username}: ${result.reels.length} reels, ${captionCount} with captions`, result);
+        onProgress(`Found ${result.reels.length} reel URL(s) for @${result.username}`, result);
       } else if (result.status === 'login_wall') {
-        onProgress(`⚠️ @${result.username}: hit a login wall — cookies may be expired or invalid`, result);
+        onProgress(`@${result.username}: hit a login wall — cookies may be expired or invalid`, result);
       } else if (result.status === 'private') {
-        onProgress(`🔒 @${result.username}: account is private`, result);
+        onProgress(`@${result.username}: account is private and not accessible with this session`, result);
       } else if (result.status === 'not_found') {
-        onProgress(`❌ @${result.username}: profile not found`, result);
+        onProgress(`@${result.username}: profile not found`, result);
       } else if (result.status === 'no_reels_found') {
-        onProgress(`📭 @${result.username}: no reels found`, result);
+        onProgress(`@${result.username}: no reels found on the profile`, result);
       } else {
-        onProgress(`❌ @${result.username}: error — ${result.error || 'unknown error'}`, result);
+        onProgress(`@${result.username}: error — ${result.error || 'unknown error'}`, result);
       }
 
       if (i < usernames.length - 1) {
-        await randomDelay(2500, 5500);
+        await randomDelay(2500, 5500); // be gentle between profiles
       }
     }
 
-    onProgress('✅ Done scraping all profiles!', null);
+    onProgress('Done.', null);
   } finally {
     await browser.close().catch(() => {});
   }
