@@ -78,19 +78,18 @@ function randomDelay(minMs, maxMs) {
   return sleep(minMs + Math.random() * (maxMs - minMs));
 }
 
-// ============== REEL COLLECTION WITH MULTIPLE SELECTORS ==============
+// ============== REEL COLLECTION WITH OPTIMIZED SCROLLING ==============
 
 async function collectReelUrls(page, { maxReels, maxScrolls }) {
   const seen = new Set();
-  let previousHeight = 0;
-  let stableRounds = 0;
-  let noNewReelsCount = 0;
   let scrollCount = 0;
   let previousSeenSize = 0;
+  let emptyScrolls = 0;
+  let totalAdded = 0;
   
   log(`🔍 Starting reel collection with maxReels=${maxReels || 'unlimited'}, maxScrolls=${maxScrolls}`);
 
-  // 🔥 NEW: Multiple selectors to catch ALL reels
+  // 🔥 Multiple selectors to catch ALL reels
   const scrapeVisible = async () => {
     const selectors = [
       'a[href*="/reel/"]',
@@ -101,7 +100,6 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
       'div[class*="x"] a[href*="/reel/"]',
       'div[class*="_a"] a[href*="/reel/"]',
       'div[role="presentation"] a[href*="/reel/"]',
-      // Instagram's new structure
       'div[class*="x1"] a[href*="/reel/"]',
       'div[class*="x2"] a[href*="/reel/"]'
     ];
@@ -113,7 +111,6 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
           as.map((a) => a.getAttribute('href')).filter(Boolean)
         );
         if (hrefs.length > 0) {
-          // Only add if we don't already have these
           allHrefs = [...allHrefs, ...hrefs];
         }
       } catch (e) {
@@ -132,22 +129,24 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
         addedCount++;
       }
     }
-    return { total: uniqueHrefs.length, added: addedCount };
+    return addedCount;
   };
 
   // Initial scrape
   log('📊 Initial scrape...');
-  const initialResult = await scrapeVisible();
+  const initialAdded = await scrapeVisible();
   previousSeenSize = seen.size;
   reelCount = seen.size;
-  log(`📊 Initial scrape found ${seen.size} reels (+${initialResult.added})`);
+  totalAdded = initialAdded;
+  log(`📊 Initial scrape found ${seen.size} reels (+${initialAdded})`);
   
   if (seen.size === 0) {
     log('⚠️ No reels found in initial scrape, waiting longer...');
     await randomDelay(3000, 5000);
-    const retryResult = await scrapeVisible();
+    const retryAdded = await scrapeVisible();
     reelCount = seen.size;
-    log(`📊 Retry scrape found ${seen.size} reels (+${retryResult.added})`);
+    totalAdded += retryAdded;
+    log(`📊 Retry scrape found ${seen.size} reels (+${retryAdded})`);
   }
 
   const maxScrollLimit = maxScrolls || 200;
@@ -159,64 +158,47 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
       break;
     }
 
-    // 🔥 Scroll more aggressively
-    const scrollDistance = 2800 + Math.random() * 2000;
-    await page.mouse.wheel(0, scrollDistance);
+    // 🔥 Scroll with consistent distance
+    await page.mouse.wheel(0, 3000);
     
-    // 🔥 Longer wait for content to load
-    await randomDelay(1200, 2000);
+    // 🔥 Short wait for content to load (600-1000ms)
+    await randomDelay(600, 1000);
     
-    // Scrape with multiple selectors
-    const result = await scrapeVisible();
-    const newSeenSize = seen.size;
-    const newReels = newSeenSize - previousSeenSize;
+    // Scrape
+    const newReels = await scrapeVisible();
+    const newTotal = seen.size;
     scrollCount = i + 1;
     reelCount = seen.size;
+    totalAdded += newReels;
     
-    // Log every scroll with count
-    log(`🔄 Scroll ${scrollCount}/${maxScrollLimit}: ${reelCount} reels (+${newReels}) | ${result.total} links found`);
-
-    // Check feed growth
-    const currentHeight = await page.evaluate(() => document.body.scrollHeight);
-    if (currentHeight === previousHeight) {
-      stableRounds += 1;
-      if (stableRounds >= 3) {
-        log(`📌 Feed stopped growing after ${stableRounds} stable scrolls`);
-        break;
-      }
-    } else {
-      stableRounds = 0;
+    // Log every 5 scrolls or when new reels found
+    if (scrollCount % 5 === 0 || newReels > 0) {
+      log(`🔄 Scroll ${scrollCount}/${maxScrollLimit}: ${reelCount} reels (+${newReels})`);
     }
     
-    // No new reels detection - wait longer before giving up
-    if (newReels === 0 && scrollCount > 3) {
-      noNewReelsCount++;
-      // Wait longer and retry
-      if (noNewReelsCount < 3) {
-        log(`⏳ No new reels, waiting longer... (${noNewReelsCount}/3)`);
-        await randomDelay(2000, 3000);
-        // Try scraping again after waiting
-        const retryResult = await scrapeVisible();
-        const retryNew = seen.size - previousSeenSize;
-        if (retryNew > 0) {
-          log(`🔄 Retry found ${retryNew} more reels`);
-          noNewReelsCount = 0;
-          reelCount = seen.size;
-          continue;
-        }
-      }
-      if (noNewReelsCount >= 4) {
-        log(`📌 No new reels in last 4 scrolls`);
+    // 🔥 If no new reels, check if we're done
+    if (newReels === 0) {
+      emptyScrolls++;
+      if (emptyScrolls >= 3) {
+        log(`📌 No new reels in ${emptyScrolls} scrolls - reached end`);
         break;
       }
+      // Wait a bit longer and retry once
+      await randomDelay(1500, 2000);
+      const retryReels = await scrapeVisible();
+      if (retryReels > 0) {
+        log(`🔄 Retry found ${retryReels} more reels`);
+        emptyScrolls = 0;
+        totalAdded += retryReels;
+      }
     } else {
-      noNewReelsCount = 0;
+      emptyScrolls = 0;
     }
     
-    previousHeight = currentHeight;
     previousSeenSize = seen.size;
     
-    await randomDelay(100, 300);
+    // Small delay between scrolls
+    await randomDelay(50, 150);
   }
 
   const totalReels = seen.size;
