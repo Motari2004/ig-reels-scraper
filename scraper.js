@@ -78,7 +78,7 @@ function randomDelay(minMs, maxMs) {
   return sleep(minMs + Math.random() * (maxMs - minMs));
 }
 
-// ============== REEL COLLECTION ==============
+// ============== REEL COLLECTION WITH MULTIPLE SELECTORS ==============
 
 async function collectReelUrls(page, { maxReels, maxScrolls }) {
   const seen = new Set();
@@ -90,30 +90,64 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
   
   log(`🔍 Starting reel collection with maxReels=${maxReels || 'unlimited'}, maxScrolls=${maxScrolls}`);
 
+  // 🔥 NEW: Multiple selectors to catch ALL reels
   const scrapeVisible = async () => {
-    const hrefs = await page.$$eval('a[href*="/reel/"]', (as) =>
-      as.map((a) => a.getAttribute('href')).filter(Boolean)
-    );
-    for (const href of hrefs) {
-      const full = href.startsWith('http') ? href : `https://www.instagram.com${href}`;
-      seen.add(full.split('?')[0]);
+    const selectors = [
+      'a[href*="/reel/"]',
+      'a[href*="/reel/"][role="link"]',
+      'article a[href*="/reel/"]',
+      'div[role="link"] a[href*="/reel/"]',
+      'section a[href*="/reel/"]',
+      'div[class*="x"] a[href*="/reel/"]',
+      'div[class*="_a"] a[href*="/reel/"]',
+      'div[role="presentation"] a[href*="/reel/"]',
+      // Instagram's new structure
+      'div[class*="x1"] a[href*="/reel/"]',
+      'div[class*="x2"] a[href*="/reel/"]'
+    ];
+    
+    let allHrefs = [];
+    for (const selector of selectors) {
+      try {
+        const hrefs = await page.$$eval(selector, (as) =>
+          as.map((a) => a.getAttribute('href')).filter(Boolean)
+        );
+        if (hrefs.length > 0) {
+          // Only add if we don't already have these
+          allHrefs = [...allHrefs, ...hrefs];
+        }
+      } catch (e) {
+        // Selector not found, continue
+      }
     }
-    return hrefs.length;
+    
+    // Deduplicate and add to seen set
+    const uniqueHrefs = [...new Set(allHrefs)];
+    let addedCount = 0;
+    for (const href of uniqueHrefs) {
+      const full = href.startsWith('http') ? href : `https://www.instagram.com${href}`;
+      const cleanUrl = full.split('?')[0];
+      if (!seen.has(cleanUrl)) {
+        seen.add(cleanUrl);
+        addedCount++;
+      }
+    }
+    return { total: uniqueHrefs.length, added: addedCount };
   };
 
   // Initial scrape
   log('📊 Initial scrape...');
-  const initialCount = await scrapeVisible();
+  const initialResult = await scrapeVisible();
   previousSeenSize = seen.size;
   reelCount = seen.size;
-  log(`📊 Initial scrape found ${seen.size} reels (${initialCount} links)`);
+  log(`📊 Initial scrape found ${seen.size} reels (+${initialResult.added})`);
   
   if (seen.size === 0) {
     log('⚠️ No reels found in initial scrape, waiting longer...');
     await randomDelay(3000, 5000);
-    const retryCount = await scrapeVisible();
+    const retryResult = await scrapeVisible();
     reelCount = seen.size;
-    log(`📊 Retry scrape found ${seen.size} reels (${retryCount} links)`);
+    log(`📊 Retry scrape found ${seen.size} reels (+${retryResult.added})`);
   }
 
   const maxScrollLimit = maxScrolls || 200;
@@ -125,22 +159,22 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
       break;
     }
 
-    // Scroll
-    const scrollDistance = 2000 + Math.random() * 1500;
+    // 🔥 Scroll more aggressively
+    const scrollDistance = 2800 + Math.random() * 2000;
     await page.mouse.wheel(0, scrollDistance);
-    await randomDelay(800, 1600);
     
-    // Scrape
-    const newLinks = await scrapeVisible();
+    // 🔥 Longer wait for content to load
+    await randomDelay(1200, 2000);
+    
+    // Scrape with multiple selectors
+    const result = await scrapeVisible();
     const newSeenSize = seen.size;
     const newReels = newSeenSize - previousSeenSize;
     scrollCount = i + 1;
     reelCount = seen.size;
     
-    // Log scroll progress
-    if (scrollCount % 5 === 0 || newReels > 0) {
-      log(`🔄 Scroll ${scrollCount}/${maxScrollLimit}: ${reelCount} reels (+${newReels}) | ${newLinks} links found`);
-    }
+    // Log every scroll with count
+    log(`🔄 Scroll ${scrollCount}/${maxScrollLimit}: ${reelCount} reels (+${newReels}) | ${result.total} links found`);
 
     // Check feed growth
     const currentHeight = await page.evaluate(() => document.body.scrollHeight);
@@ -154,9 +188,23 @@ async function collectReelUrls(page, { maxReels, maxScrolls }) {
       stableRounds = 0;
     }
     
-    // No new reels detection
+    // No new reels detection - wait longer before giving up
     if (newReels === 0 && scrollCount > 3) {
       noNewReelsCount++;
+      // Wait longer and retry
+      if (noNewReelsCount < 3) {
+        log(`⏳ No new reels, waiting longer... (${noNewReelsCount}/3)`);
+        await randomDelay(2000, 3000);
+        // Try scraping again after waiting
+        const retryResult = await scrapeVisible();
+        const retryNew = seen.size - previousSeenSize;
+        if (retryNew > 0) {
+          log(`🔄 Retry found ${retryNew} more reels`);
+          noNewReelsCount = 0;
+          reelCount = seen.size;
+          continue;
+        }
+      }
       if (noNewReelsCount >= 4) {
         log(`📌 No new reels in last 4 scrolls`);
         break;
@@ -358,7 +406,6 @@ async function scrapeProfiles(cookies, usernames, options, onProgress) {
 
     onProgress(`✅ Complete: ${totalReelsFound} reels from ${completedProfiles} profiles`, null);
     
-    // 🔥 FIX: Return the results array
     return allResults;
     
   } catch (err) {
