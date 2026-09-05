@@ -68,13 +68,12 @@ function basicAuth(req, res, next) {
 }
 
 app.use(basicAuth);
-app.use(express.json({ limit: '50mb' })); // 🔥 Increased for 1000+ reels
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============== JOB STORAGE ==============
 const jobs = new Map();
 
-// Clean old jobs every 30 minutes
 setInterval(() => {
   const cutoff = Date.now() - 2 * 60 * 60 * 1000;
   const before = jobs.size;
@@ -96,9 +95,9 @@ const VERCEL_API_KEY = process.env.VERCEL_API_KEY || '';
 async function sendReelsToVercel(jobId, results) {
   const startTime = Date.now();
   log(`📤 [Job ${jobId}] Sending results to Vercel...`);
+  logMemory();
   
   try {
-    // Extract all reel URLs from the results
     const allReelUrls = [];
     const profileMap = {};
     
@@ -116,87 +115,40 @@ async function sendReelsToVercel(jobId, results) {
     }
 
     log(`[Job ${jobId}] 📤 Sending ${allReelUrls.length} reels from ${Object.keys(profileMap).length} profiles to Vercel...`);
-    logMemory();
 
-    // 🔥 For large batches, send in chunks to avoid timeout
-    const CHUNK_SIZE = 500;
-    let totalSent = 0;
-    let totalStored = 0;
-    let errors = [];
+    const payload = { 
+      reels: allReelUrls,
+      job_id: jobId,
+      timestamp: new Date().toISOString()
+    };
 
-    // Send to process-reels endpoint (for generating download URLs)
-    if (allReelUrls.length > CHUNK_SIZE) {
-      log(`[Job ${jobId}] 📦 Large batch (${allReelUrls.length}), splitting into chunks of ${CHUNK_SIZE}`);
-      
-      for (let i = 0; i < allReelUrls.length; i += CHUNK_SIZE) {
-        const chunk = allReelUrls.slice(i, i + CHUNK_SIZE);
-        const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
-        const totalChunks = Math.ceil(allReelUrls.length / CHUNK_SIZE);
-        
-        log(`[Job ${jobId}] 📦 Sending chunk ${chunkNum}/${totalChunks} (${chunk.length} reels)...`);
-        
-        try {
-          const payload = { 
-            reels: chunk,
-            job_id: jobId,
-            chunk: chunkNum,
-            total_chunks: totalChunks,
-            timestamp: new Date().toISOString()
-          };
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'IG-Reels-Scraper/1.0'
+    };
 
-          const headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': 'IG-Reels-Scraper/1.0'
-          };
-          
-          if (VERCEL_API_KEY) {
-            headers['X-API-Key'] = VERCEL_API_KEY;
-          }
+    if (VERCEL_API_KEY) {
+      headers['X-API-Key'] = VERCEL_API_KEY;
+    }
 
-          const response = await axios.post(VERCEL_WEBHOOK_URL, payload, {
-            headers: headers,
-            timeout: 120000
-          });
-          
-          totalSent += chunk.length;
-          log(`[Job ${jobId}] ✅ Chunk ${chunkNum}/${totalChunks} sent (${chunk.length} reels)`);
-          
-        } catch (error) {
-          log(`[Job ${jobId}] ❌ Chunk ${chunkNum}/${totalChunks} failed: ${error.message}`);
-          errors.push(`Chunk ${chunkNum}: ${error.message}`);
-        }
-        
-        // Small delay between chunks
-        if (i + CHUNK_SIZE < allReelUrls.length) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-    } else {
-      // Small batch - send all at once
-      const payload = { 
-        reels: allReelUrls,
-        job_id: jobId,
-        timestamp: new Date().toISOString()
-      };
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'IG-Reels-Scraper/1.0'
-      };
-      
-      if (VERCEL_API_KEY) {
-        headers['X-API-Key'] = VERCEL_API_KEY;
-      }
-
-      const response = await axios.post(VERCEL_WEBHOOK_URL, payload, {
+    // Send to process-reels endpoint
+    let processResponse = null;
+    try {
+      log(`[Job ${jobId}] 📤 POST to ${VERCEL_WEBHOOK_URL} (${allReelUrls.length} reels)`);
+      processResponse = await axios.post(VERCEL_WEBHOOK_URL, payload, {
         headers: headers,
         timeout: 120000
       });
-      totalSent = allReelUrls.length;
-      log(`[Job ${jobId}] ✅ Sent ${totalSent} reels to Vercel process endpoint`);
+      log(`[Job ${jobId}] ✅ Vercel process endpoint responded: ${processResponse.status}`);
+    } catch (error) {
+      log(`[Job ${jobId}] ❌ Failed to send to Vercel process endpoint: ${error.message}`);
+      if (error.response) {
+        log(`[Job ${jobId}] Response: ${error.response.status} - ${JSON.stringify(error.response.data).substring(0, 200)}`);
+      }
     }
 
-    // Send to storage endpoint (for storing results)
+    // Send to storage endpoint
+    let storageResponse = null;
     try {
       const storagePayload = {
         results: results,
@@ -204,41 +156,31 @@ async function sendReelsToVercel(jobId, results) {
         timestamp: new Date().toISOString()
       };
       
-      const headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'IG-Reels-Scraper/1.0'
-      };
-      
-      if (VERCEL_API_KEY) {
-        headers['X-API-Key'] = VERCEL_API_KEY;
-      }
-
-      const storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
+      log(`[Job ${jobId}] 💾 POST to ${VERCEL_STORAGE_URL} (${results.length} profiles)`);
+      storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
         headers: headers,
-        timeout: 60000 // 60 seconds for storage
+        timeout: 60000
       });
-      
-      totalStored = results.length;
-      log(`[Job ${jobId}] ✅ Stored ${totalStored} profiles on Vercel storage`);
-      
+      log(`[Job ${jobId}] ✅ Vercel storage responded: ${storageResponse.status}`);
     } catch (error) {
-      log(`[Job ${jobId}] ❌ Storage failed: ${error.message}`);
-      errors.push(`Storage: ${error.message}`);
+      log(`[Job ${jobId}] ❌ Failed to store results on Vercel: ${error.message}`);
+      if (error.response) {
+        log(`[Job ${jobId}] Response: ${error.response.status} - ${JSON.stringify(error.response.data).substring(0, 200)}`);
+      }
     }
-
+    
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    log(`[Job ${jobId}] ✅ Vercel send complete: ${totalSent} reels, ${totalStored} profiles in ${elapsed}s`);
+    log(`[Job ${jobId}] ✅ Vercel send complete in ${elapsed}s`);
+    logMemory();
     
     return {
       sent: true,
-      count: totalSent,
-      profiles: totalStored,
-      chunks: Math.ceil(allReelUrls.length / CHUNK_SIZE),
-      errors: errors.length > 0 ? errors : null,
-      message: `Sent ${totalSent} reels to Vercel`,
+      count: allReelUrls.length,
+      message: `Sent ${allReelUrls.length} reels to Vercel`,
+      process_status: processResponse ? processResponse.status : null,
+      storage_status: storageResponse ? storageResponse.status : null,
       elapsed: elapsed
     };
-    
   } catch (error) {
     log(`[Job ${jobId}] ❌ Failed to send results to Vercel: ${error.message}`);
     if (error.response) {
@@ -258,12 +200,15 @@ async function sendReelsToVercel(jobId, results) {
 app.post('/api/scrape/start', (req, res) => {
   const { cookies, usernames, maxReels, maxScrolls, headless, sendToVercel } = req.body || {};
 
-  log(`📥 Received scrape request: ${usernames ? usernames.length : 0} profiles, maxReels=${maxReels || 'default'}`);
+  log(`📥 Received scrape request: ${usernames ? usernames.length : 0} profiles, maxReels=${maxReels || 'default'}, maxScrolls=${maxScrolls || 'default'}`);
+  logMemory();
 
   if (!Array.isArray(cookies) || cookies.length === 0) {
+    log('❌ No cookies provided');
     return res.status(400).json({ error: 'cookies (from cookie.json) are required' });
   }
   if (!Array.isArray(usernames) || usernames.filter((u) => u && u.trim()).length === 0) {
+    log('❌ No usernames provided');
     return res.status(400).json({ error: 'at least one target username is required' });
   }
 
@@ -282,13 +227,12 @@ app.post('/api/scrape/start', (req, res) => {
   const shouldSendToVercel = sendToVercel !== false;
   log(`[Job ${jobId}] Created job for ${usernames.length} profiles`);
 
-  // Start scraping in background (non-blocking)
   scrapeProfiles(
     cookies,
     usernames,
     { 
-      maxReels: maxReels || 500, // 🔥 Default 500
-      maxScrolls: maxScrolls || 200, // 🔥 Default 200 scrolls for 1000+ reels
+      maxReels: maxReels || 500,
+      maxScrolls: maxScrolls || 200,
       headless: headless !== false,
       jobId: jobId 
     },
@@ -301,7 +245,6 @@ app.post('/api/scrape/start', (req, res) => {
       job.status = 'done';
       const totalReels = allResults.reduce((sum, r) => sum + (r.reels ? r.reels.length : 0), 0);
       job.log.push({ time: Date.now(), message: `✅ Scraping completed: ${totalReels} reels` });
-      
       log(`[Job ${jobId}] ✅ Scraping completed: ${allResults.length} profiles, ${totalReels} reels`);
       
       if (shouldSendToVercel) {
@@ -325,6 +268,9 @@ app.post('/api/scrape/start', (req, res) => {
       job.error = err.message;
       job.log.push({ time: Date.now(), message: `❌ Fatal error: ${err.message}` });
       log(`[Job ${jobId}] ❌ Fatal error: ${err.message}`);
+      if (err.stack) {
+        log(`[Job ${jobId}] 📚 Stack: ${err.stack}`);
+      }
     });
 
   res.json({ 
@@ -339,7 +285,10 @@ app.post('/api/scrape/start', (req, res) => {
 
 app.get('/api/scrape/status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'job not found' });
+  if (!job) {
+    log(`❌ Job not found: ${req.params.jobId}`);
+    return res.status(404).json({ error: 'job not found' });
+  }
   
   const totalReels = job.results.reduce((sum, r) => sum + (r.reels ? r.reels.length : 0), 0);
   
@@ -352,16 +301,19 @@ app.get('/api/scrape/status/:jobId', (req, res) => {
     profiles: job.results.length,
     error: job.error,
     startedAt: job.startedAt,
-    vercel: job.vercel || { sent: false, count: 0 },
-    message: job.status === 'done' ? `✅ ${totalReels} reels from ${job.results.length} profiles` : job.status
+    vercel: job.vercel || { sent: false, count: 0 }
   });
 });
 
 app.get('/api/scrape/download/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'job not found' });
+  if (!job) {
+    log(`❌ Job not found for download: ${req.params.jobId}`);
+    return res.status(404).json({ error: 'job not found' });
+  }
 
   const format = (req.query.format || 'json').toLowerCase();
+  log(`📥 Downloading job ${req.params.jobId} as ${format}`);
 
   if (format === 'csv') {
     let csv = 'username,status,reel_url\n';
@@ -384,13 +336,14 @@ app.get('/api/scrape/download/:jobId', (req, res) => {
   res.send(JSON.stringify(job.results, null, 2));
 });
 
-// Health check endpoint with detailed info
 app.get('/api/health', (req, res) => {
   const totalJobs = jobs.size;
   const runningJobs = [...jobs.values()].filter(j => j.status === 'running').length;
   const totalReels = [...jobs.values()].reduce((sum, j) => {
     return sum + j.results.reduce((s, r) => s + (r.reels ? r.reels.length : 0), 0);
   }, 0);
+  
+  log(`📊 Health check: ${totalJobs} jobs, ${runningJobs} running, ${totalReels} total reels`);
   
   res.json({
     status: 'healthy',
@@ -412,8 +365,9 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Get latest job results
 app.get('/api/scrape/latest', (req, res) => {
+  log('📊 Fetching latest job...');
+  
   let latestJob = null;
   let latestTime = 0;
   
@@ -425,10 +379,12 @@ app.get('/api/scrape/latest', (req, res) => {
   }
   
   if (!latestJob) {
+    log('❌ No completed jobs found');
     return res.status(404).json({ error: 'No completed jobs found' });
   }
   
   const totalReels = latestJob.results.reduce((sum, r) => sum + (r.reels ? r.reels.length : 0), 0);
+  log(`📊 Found latest job: ${latestJob.id} with ${totalReels} reels`);
   
   res.json({
     id: latestJob.id,
@@ -452,4 +408,5 @@ app.listen(PORT, () => {
   console.log(`⚙️  Max scrolls: ${process.env.MAX_SCROLLS || 200}`);
   console.log(`🎯 Max reels: ${process.env.MAX_REELS || 500}`);
   console.log(`========================================`);
+  logMemory();
 });
