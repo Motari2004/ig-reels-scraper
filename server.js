@@ -8,7 +8,7 @@ const { scrapeProfiles } = require('./scraper');
 const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 // ============== LOGGING ==============
 function log(message, data = null) {
@@ -123,42 +123,64 @@ async function sendReelsToVercel(jobId, results) {
       headers['X-API-Key'] = VERCEL_API_KEY;
     }
 
+    // Try to send to Vercel with retry
     let processResponse = null;
-    try {
-      processResponse = await axios.post(VERCEL_WEBHOOK_URL, payload, {
-        headers: headers,
-        timeout: 120000
-      });
-      log(`[Job ${jobId}] Successfully sent to Vercel process endpoint.`);
-    } catch (error) {
-      log(`[Job ${jobId}] Failed to send to Vercel process endpoint: ${error.message}`);
-      if (error.response) {
-        log(`[Job ${jobId}] Response: ${error.response.status} - ${JSON.stringify(error.response.data).substring(0, 200)}`);
+    let storageResponse = null;
+    
+    // Retry up to 3 times for each endpoint
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (attempt > 1) {
+          const waitTime = Math.pow(2, attempt) * 2;
+          log(`[Job ${jobId}] Retry ${attempt}/3 for Vercel in ${waitTime}s...`);
+          await sleep(waitTime * 1000);
+        }
+        
+        processResponse = await axios.post(VERCEL_WEBHOOK_URL, payload, {
+          headers: headers,
+          timeout: 120000
+        });
+        log(`[Job ${jobId}] ✅ Successfully sent to Vercel process endpoint (attempt ${attempt}).`);
+        break;
+      } catch (error) {
+        log(`[Job ${jobId}] ⚠️ Vercel attempt ${attempt} failed: ${error.message}`);
+        if (attempt === 3) {
+          log(`[Job ${jobId}] ❌ All Vercel attempts failed.`);
+        }
       }
     }
 
-    let storageResponse = null;
-    try {
-      const storagePayload = {
-        results: results,
-        job_id: jobId,
-        timestamp: new Date().toISOString()
-      };
-      
-      storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
-        headers: headers,
-        timeout: 30000
-      });
-      log(`[Job ${jobId}] Stored results on Vercel storage.`);
-    } catch (error) {
-      log(`[Job ${jobId}] Failed to store results on Vercel: ${error.message}`);
-      if (error.response) {
-        log(`[Job ${jobId}] Response: ${error.response.status} - ${JSON.stringify(error.response.data).substring(0, 200)}`);
+    // Storage endpoint (with retry)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (attempt > 1) {
+          const waitTime = Math.pow(2, attempt) * 2;
+          log(`[Job ${jobId}] Storage retry ${attempt}/3 in ${waitTime}s...`);
+          await sleep(waitTime * 1000);
+        }
+        
+        const storagePayload = {
+          results: results,
+          job_id: jobId,
+          timestamp: new Date().toISOString()
+        };
+        
+        storageResponse = await axios.post(VERCEL_STORAGE_URL, storagePayload, {
+          headers: headers,
+          timeout: 30000
+        });
+        log(`[Job ${jobId}] ✅ Stored results on Vercel storage (attempt ${attempt}).`);
+        break;
+      } catch (error) {
+        log(`[Job ${jobId}] ⚠️ Storage attempt ${attempt} failed: ${error.message}`);
+        if (attempt === 3) {
+          log(`[Job ${jobId}] ❌ All storage attempts failed.`);
+        }
       }
     }
     
     return {
-      sent: true,
+      sent: !!(processResponse || storageResponse),
       count: allReelUrls.length,
       message: `Sent ${allReelUrls.length} reels to Vercel`,
       process_status: processResponse ? processResponse.status : null,
@@ -176,6 +198,10 @@ async function sendReelsToVercel(jobId, results) {
       details: error.response ? error.response.data : null
     };
   }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============== ROUTES ==============
@@ -207,6 +233,7 @@ app.post('/api/scrape/start', (req, res) => {
   const shouldSendToVercel = sendToVercel !== false;
   log(`[Job ${jobId}] Created job for ${usernames.length} profiles`);
 
+  // Start scraping with retry logic
   scrapeProfiles(
     cookies,
     usernames,
@@ -214,7 +241,8 @@ app.post('/api/scrape/start', (req, res) => {
       maxReels: maxReels || 500,
       maxScrolls: maxScrolls || 200,
       headless: headless !== false,
-      jobId: jobId 
+      jobId: jobId,
+      startTime: Date.now()
     },
     (message, result) => {
       job.log.push({ time: Date.now(), message });
@@ -222,7 +250,6 @@ app.post('/api/scrape/start', (req, res) => {
     }
   )
     .then(async (allResults) => {
-      // 🔥 FIX: Check if allResults exists
       if (!allResults) {
         log(`[Job ${jobId}] ⚠️ No results returned from scraper`);
         job.status = 'error';
@@ -325,7 +352,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'IG Reels Scraper',
-    version: '1.0.0',
+    version: '2.0.0',
     uptime: process.uptime(),
     vercel_webhook_configured: !!VERCEL_WEBHOOK_URL,
     vercel_storage_configured: !!VERCEL_STORAGE_URL,
@@ -363,7 +390,8 @@ app.get('/api/scrape/latest', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+// ============== START SERVER ==============
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`========================================`);
   console.log(`🤖 IG Reels Scraper v2.0`);
   console.log(`========================================`);
