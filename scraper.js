@@ -78,6 +78,102 @@ function randomDelay(minMs, maxMs) {
   return sleep(minMs + Math.random() * (maxMs - minMs));
 }
 
+// ============== VIDEO URL EXTRACTION WITH EXPONENTIAL BACKOFF ==============
+
+async function extractVideoUrlWithRetry(page, url, maxRetries = 3) {
+  const methods = [
+    // Method 1: Try video element
+    async () => {
+      const video = await page.querySelector('video');
+      if (video) {
+        const src = await video.getAttribute('src');
+        if (src && (src.includes('.mp4') || src.includes('video'))) {
+          return src;
+        }
+      }
+      return null;
+    },
+    
+    // Method 2: Try source element
+    async () => {
+      const source = await page.querySelector('source');
+      if (source) {
+        const src = await source.getAttribute('src');
+        if (src && (src.includes('.mp4') || src.includes('video'))) {
+          return src;
+        }
+      }
+      return null;
+    },
+    
+    // Method 3: Try meta tags
+    async () => {
+      const meta = await page.querySelector('meta[property="og:video"]');
+      if (meta) {
+        const content = await meta.getAttribute('content');
+        if (content && (content.includes('.mp4') || content.includes('video'))) {
+          return content;
+        }
+      }
+      return null;
+    },
+    
+    // Method 4: Try rapidcdn URL pattern
+    async () => {
+      const content = await page.content();
+      const rapidCdnPattern = /https:\/\/[^"]*rapidcdn[^"]*\.mp4[^"]*/gi;
+      const matches = content.match(rapidCdnPattern);
+      if (matches && matches.length > 0) {
+        return matches[0];
+      }
+      return null;
+    },
+    
+    // Method 5: Try external video URL service
+    async () => {
+      try {
+        const axios = require('axios');
+        const response = await axios.post(
+          'https://igvideourl.onrender.com/api/download',
+          { url: url },
+          { timeout: 10000 }
+        );
+        if (response.data && response.data.success) {
+          const videoData = response.data.data || {};
+          return videoData.downloadUrl || videoData.directDownloadUrl || null;
+        }
+        return null;
+      } catch (e) {
+        return null;
+      }
+    }
+  ];
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (const method of methods) {
+      try {
+        const result = await method();
+        if (result) {
+          log(`✅ Found video URL (attempt ${attempt})`);
+          return result;
+        }
+      } catch (e) {
+        // Method failed, try next
+      }
+    }
+    
+    // Wait with exponential backoff before retry
+    if (attempt < maxRetries) {
+      const delay = Math.pow(2, attempt) * 2000; // 4s, 8s, 16s
+      log(`⏳ Attempt ${attempt}/${maxRetries} failed, retrying in ${delay/1000}s...`);
+      await sleep(delay);
+    }
+  }
+  
+  log(`❌ All ${maxRetries} attempts failed to find video URL`);
+  return null;
+}
+
 // ============== REEL COLLECTION WITH OPTIMIZED SCROLLING ==============
 
 async function collectReelUrls(page, { maxReels, maxScrolls }) {
@@ -402,4 +498,4 @@ async function scrapeProfiles(cookies, usernames, options, onProgress) {
   }
 }
 
-module.exports = { scrapeProfiles, normalizeCookies };
+module.exports = { scrapeProfiles, normalizeCookies, extractVideoUrlWithRetry };
